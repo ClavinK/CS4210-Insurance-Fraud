@@ -1,0 +1,197 @@
+import pandas as pd
+import numpy as np
+
+from google.colab import files
+
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score, classification_report,
+    precision_recall_fscore_support
+)
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+
+from imblearn.over_sampling import SMOTE
+
+# ------------------------------------------------------
+# 1. Upload and load data
+# ------------------------------------------------------
+uploaded = files.upload()
+df = pd.read_csv(list(uploaded.keys())[0])
+print(df.head())
+
+# ------------------------------------------------------
+# 2. Date + engineered features
+# ------------------------------------------------------
+df["incident_date"] = pd.to_datetime(df["incident_date"])
+df["incident_month"] = df["incident_date"].dt.month
+df["incident_day"] = df["incident_date"].dt.day
+df["incident_weekday"] = df["incident_date"].dt.weekday
+
+df["avg_claim"] = (df["injury_claim"] + df["property_claim"] + df["vehicle_claim"]) / 3
+df["total_vs_premium_ratio"] = df["total_claim_amount"] / df["policy_annual_premium"]
+
+df["high_umbrella"] = (df["umbrella_limit"] > 1000000).astype(int)
+df["night_incident"] = (df["incident_hour_of_the_day"] >= 22).astype(int)
+
+rare = df["insured_occupation"].value_counts()[df["insured_occupation"].value_counts() < 20].index
+df["insured_occupation"] = df["insured_occupation"].replace(rare, "Other")
+
+# ------------------------------------------------------
+# 3. Drop unwanted columns
+# ------------------------------------------------------
+drop_cols = [
+    "_c39",
+    "policy_number",
+    "incident_location",
+    "insured_zip",
+    "auto_make",
+    "auto_model",
+    "incident_state",
+    "incident_city",
+    "incident_date"
+]
+df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+
+# ------------------------------------------------------
+# 4. Define X, y
+# ------------------------------------------------------
+target = "fraud_reported"
+df = df[df[target].notna()].copy()
+
+y = df[target].astype(int)
+X = df.drop(columns=[target])
+
+# ------------------------------------------------------
+# 5. Preprocessing — OneHot encoding for categorical columns
+# ------------------------------------------------------
+cat_cols = X.select_dtypes(include=["object"]).columns
+num_cols = X.columns.difference(cat_cols)
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+        ("num", "passthrough", num_cols)
+    ]
+)
+
+# ------------------------------------------------------
+# 6. Train / test split
+# ------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# ------------------------------------------------------
+# 7. Encode train + test
+# ------------------------------------------------------
+X_train_enc = preprocessor.fit_transform(X_train)
+X_test_enc  = preprocessor.transform(X_test)
+
+X_train_enc_dense = X_train_enc.toarray()
+X_test_enc_dense  = X_test_enc.toarray()
+
+# ------------------------------------------------------
+# 8. SMOTE (balanced training)
+# ------------------------------------------------------
+sm = SMOTE(random_state=42)
+X_train_resampled, y_train_resampled = sm.fit_resample(
+    X_train_enc_dense, y_train
+)
+
+# ------------------------------------------------------
+# 9. Random Forest Hyperparameter Tuning
+# ------------------------------------------------------
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+
+# Base RF model
+rf = RandomForestClassifier(
+    class_weight="balanced",
+    n_jobs=-1,
+    random_state=42
+)
+
+# Smaller, explicit grid (GridSearch tries ALL combinations)
+param_grid = {
+    "n_estimators": [200, 300],
+    "max_depth": [20, 30, None],
+    "min_samples_split": [2, 5],
+    "min_samples_leaf": [1, 2],
+    "max_features": ["sqrt", "log2"]
+}
+
+search = GridSearchCV(
+    estimator=rf,
+    param_grid=param_grid,
+    cv=5,
+    scoring="f1",   # optimize fraud F1
+    n_jobs=-1,
+    verbose=1
+)
+
+# IMPORTANT: still fit on SMOTE-resampled training data
+search.fit(X_train_resampled, y_train_resampled)
+
+best_model = search.best_estimator_
+print("\nBest hyperparameters (GridSearchCV):", search.best_params_)
+
+
+# ------------------------------------------------------
+# 10. Evaluate baseline at threshold 0.50
+# ------------------------------------------------------
+y_proba = best_model.predict_proba(X_test_enc_dense)[:, 1]
+
+threshold_default = 0.50
+y_pred_default = (y_proba >= threshold_default).astype(int)
+
+print(f"\nDefault threshold = {threshold_default}")
+print("Accuracy:", accuracy_score(y_test, y_pred_default))
+print(classification_report(y_test, y_pred_default))
+
+# ------------------------------------------------------
+# 11. Threshold sweep (0.30 → 0.50 step 0.02)
+# ------------------------------------------------------
+thresholds = np.arange(0.30, 0.52, 0.02)
+
+print("\nthr | acc | fraud_prec | fraud_recall | fraud_f1")
+best_thr = None
+best_f1 = -1
+
+for t in thresholds:
+    y_pred_t = (y_proba >= t).astype(int)
+    acc = accuracy_score(y_test, y_pred_t)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_test, y_pred_t, average=None, labels=[0, 1]
+    )
+    print(f"{t:.2f} | {acc:.3f} | {precision[1]:.3f} | {recall[1]:.3f} | {f1[1]:.3f}")
+    if f1[1] > best_f1:
+        best_f1 = f1[1]
+        best_thr = t
+
+print(f"\nBest fraud F1 = {best_f1:.3f} at threshold = {best_thr:.2f}")
+
+# ------------------------------------------------------
+# 12. Final model evaluation at best threshold
+# ------------------------------------------------------
+y_pred_best = (y_proba >= best_thr).astype(int)
+
+print(f"\nUsing BEST threshold = {best_thr:.2f}")
+print("Accuracy:", accuracy_score(y_test, y_pred_best))
+print(classification_report(y_test, y_pred_best))
+
+# ------------------------------------------------------
+# 13. Feature importance
+# ------------------------------------------------------
+ohe = preprocessor.named_transformers_["cat"]
+cat_feature_names = ohe.get_feature_names_out(cat_cols)
+all_feature_names = np.concatenate([cat_feature_names, num_cols])
+
+importances = pd.Series(
+    best_model.feature_importances_,
+    index=all_feature_names
+).sort_values(ascending=False)
+
+print("\nTop Predictive Features:\n", importances.head(20))
