@@ -173,6 +173,28 @@ for t in thresholds:
 
 print(f"\nBest fraud F1 = {best_f1:.3f} at threshold = {best_thr:.2f}")
 
+from sklearn.metrics import roc_curve, roc_auc_score
+import matplotlib.pyplot as plt
+
+
+# ------------------------------------------------------
+# ROC curve + AUC
+# ------------------------------------------------------
+fpr, tpr, roc_thresholds = roc_curve(y_test, y_proba)
+auc = roc_auc_score(y_test, y_proba)
+
+plt.figure(figsize=(6, 5))
+plt.plot(fpr, tpr, label=f"RandomForest (AUC = {auc:.3f})")
+plt.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Random guess")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate (Recall)")
+plt.title("ROC Curve - Random Forest")
+plt.legend(loc="lower right")
+plt.grid(True, linestyle="--", alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+
 # ------------------------------------------------------
 # 12. Final model evaluation at best threshold
 # ------------------------------------------------------
