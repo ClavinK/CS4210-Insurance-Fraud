@@ -107,14 +107,14 @@ X_train_resampled, y_train_resampled = sm.fit_resample(
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
 
-# Base RF model
+
 rf = RandomForestClassifier(
     class_weight="balanced",
     n_jobs=-1,
     random_state=42
 )
 
-# Smaller, explicit grid (GridSearch tries ALL combinations)
+
 param_grid = {
     "n_estimators": [200, 300],
     "max_depth": [20, 30, None],
